@@ -16,6 +16,8 @@ def make_type(name, tag, builder_fn, size_len=0, tag_bits=8,
 
         def __init__(self, tag_byte):
             self.tag_byte = tag_byte
+            self.size_len = size_len
+            self.name = name
 
         def is_container(self):
             return is_container
@@ -89,7 +91,7 @@ class Decoder:
             return 0
         tag_byte = buf[0]
         for T in MessagePackTypes:
-            if T.match_tag(tag_byte):
+            if T.matches_tag(tag_byte):
                 self._type = T(tag_byte)
                 return 1
         raise TypeError('unknown tag byte: ' + repr(tag_byte))
@@ -107,3 +109,17 @@ class Decoder:
         if len(self._size_buffer) == self._type.size_len:
             self._size = self._type.size(self._size_buffer)
         return len(bytes_to_use)
+
+
+def main():
+    from umsgpack import packb
+    b = packb([5, 6])
+    d = Decoder()
+    d.write(b)
+    assert d._type.name == 'fixarray'
+    assert d._size == 2
+    print('Success!')
+
+
+if __name__ == '__main__':
+    main()
