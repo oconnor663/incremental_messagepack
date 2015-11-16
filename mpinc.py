@@ -1,8 +1,9 @@
 #! /usr/bin/env python3
 
 
+# TODO: Can we avoid using a big class for all this?
 def make_type(tag, name, builder_fn, size_len=0, tag_bits=8,
-              is_container=False):
+              is_container=False, size_fn=lambda x: x):
 
     tag_mask = (255 << (8-tag_bits)) % 256
     size_mask = 255 ^ tag_mask
@@ -20,7 +21,7 @@ def make_type(tag, name, builder_fn, size_len=0, tag_bits=8,
             self.name = name
             self.is_container = is_container
 
-        def size(self, size_buffer):
+        def get_N(self, size_buffer):
             assert len(size_buffer) == size_len
             if size_len == 0:
                 # The size is stored in the tag byte. Mask it out.
@@ -29,37 +30,49 @@ def make_type(tag, name, builder_fn, size_len=0, tag_bits=8,
                 # TODO: map and ext types will behave differently here.
                 return int.from_bytes(size_buffer, byteorder='big')
 
-        def build(self, buffer_or_list):
-            return builder_fn(self.tag_byte, buffer_or_list)
+        def size(self, size_buffer):
+            N = self.get_N(size_buffer)
+            return size_fn(N)
+
+        def build(self, size_buffer, payload):
+            N = self.get_N(size_buffer)
+            return builder_fn(N, payload)
 
     return Type
 
 
-def return_size(size, payload):
-    return size
+def size_const(const):
+    return lambda N: const
 
 
-def return_payload(size, payload):
+def build_return_N(N, payload):
+    return N
+
+
+def build_return_payload(N, payload):
     return payload
 
 
-def build_int(_, payload):
+def build_int(N, payload):
     return int.from_bytes(payload, signed=True, byteorder='big')
 
 
-def build_uint(_, payload):
+def build_uint(N, payload):
     return int.from_bytes(payload, signed=False, byteorder='big')
 
 
-def build_str(_, payload):
+def build_str(N, payload):
     return payload.encode()
 
 
 MessagePackTypes = [
-    make_type(0x00, "positive fixint", return_size, tag_bits=1),
+    make_type(0x00, "positive fixint", build_return_N, tag_bits=1,
+              size_fn=size_const(0)),
     make_type(0xa0, "fixstr", build_str, tag_bits=3),
-    make_type(0x90, "fixarray", return_payload, tag_bits=4, is_container=True),
-    make_type(0xdc, "array16", return_payload, size_len=2, is_container=True),
+    make_type(0x90, "fixarray", build_return_payload, tag_bits=4,
+              is_container=True),
+    make_type(0xdc, "array16", build_return_payload, size_len=2,
+              is_container=True),
 ]
 
 
@@ -118,22 +131,19 @@ class Decoder:
 
     def _write_into_container(self, buf, buf_start):
         used = 0
-        print("START")
         while len(self._payload_list) < self._size:
             if len(buf) <= buf_start + used:
-                print("OUT")
                 break
             if self._child_decoder is None:
                 self._child_decoder = Decoder()
-            used += self._child_decoder.write(buf, buf_start)
-            print("used:", used)
+            used += self._child_decoder.write(buf, buf_start + used)
             if self._child_decoder.has_value:
-                print("acquired", repr(self._child_decoder.value))
                 self._payload_list.append(self._child_decoder.value)
                 self._child_decoder = None
         else:
             self.has_value = True
-            self.value = self._type.build(self._payload_list)
+            self.value = self._type.build(
+                self._size_buffer, self._payload_list)
         return used
 
     def _write_into_bytes(self, buf, buf_start):
@@ -143,7 +153,8 @@ class Decoder:
         self._payload_buffer.extend(bytes_to_use)
         if len(self._payload_buffer) == self._size:
             self.has_value = True
-            self.value = self._type.build(self._payload_buffer)
+            self.value = self._type.build(
+                self._size_buffer, self._payload_buffer)
         return len(bytes_to_use)
 
 
@@ -155,7 +166,6 @@ def main():
     assert d._type.name == 'fixarray'
     assert d._size == 2
     assert d.has_value
-    print(d.value)
     assert d.value == [5, 6]
     print('Success!')
 
