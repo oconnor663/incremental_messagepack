@@ -3,8 +3,9 @@
 from collections import namedtuple
 
 ShortType = namedtuple('ShortType', ['tag', 'tag_mask', 'name'])
+ShortType.size_bytes = 0
 
-short_types = [ShortType(t) for t in [
+short_types = [ShortType(*t) for t in [
     (0b00000000, 0b10000000, "positive fixint"),
     (0b10100000, 0b11100000, "fixstr"),
     (0b10010000, 0b11110000, "fixarray"),
@@ -12,53 +13,58 @@ short_types = [ShortType(t) for t in [
 
 LongType = namedtuple('LongType', ['tag', 'size_bytes', 'name'])
 
-long_types = [LongType(t) for t in [
+long_types = [LongType(*t) for t in [
     (0xdc, 2, "array16"),
 ]]
 
 
-def get_type(buf):
-    '''Return a type tuple and a size, or (None, None) to indicate that more
-    bytes are required to determine the type/size.'''
-    # Short circuit for empty bytes.
-    if len(buf) == 0:
-        return None, None
-    # Check to see if we have a short tag (just 1 byte).
-    for t in short_types:
-        if (buf[0] & t.tag_mask) == t.tag:
-            size_mask = 0b11111111 ^ t.tag_mask
-            size = buf[0] & size_mask
-            return t, size
-    # Check to see if we have a long tag, and if so whether we have the size.
-    for t in long_types:
-        if buf[0] == t.tag:
-            if len(buf) >= t.size_bytes+1:
-                size = int.from_bytes(buf[1:t.size_bytes+1], byteorder='big')
-                return t, size
-            else:
-                # We have the tag, but we need more bytes for the size.
-                return None, None
-    raise ValueError('No type recognized for ' + repr(buf))
+def get_type(byte):
+    for type in short_types:
+        if (byte & type.tag_mask) == type.tag:
+            return type
+    for type in long_types:
+        if byte == type.tag:
+            return type
+    raise ValueError('No type recognized for {} ({}).'
+                     .format(hex(byte), bin(byte)))
 
 
 class Decoder:
     def __init__(self):
         self.has_value = False
         self.value = None
-        self._buffer = bytearray()
+        self._size_buffer = bytearray()
         self._type = None
-        self._size = 0
+        self._size = None
 
     def write(self, buf):
-        '''Feed bytes into the decoder. Returns the number of bytes accepted,
-        which is zero if this decoder already has a value.'''
-        # If we don't have a type yet, try to derive one from the bytes we have
-        # so far plus the first 18 bytes of buf. (The largest possible
-        # MessagePack tag is fixext16, which is 18 bytes long.)
-        if self.type is None:
-            self._type, self._size = get_type(self._buffer + buf[:18])
-        # If we still don't have a type, accept all of buf and return.
-        if self.type is None:
-            self._buffer.extend(buf)
-            return len(buf)
-        # Now figure out how many total bytes we're supposed to need...
+        '''Feed bytes into the decoder. Returns the number of bytes used. Once
+        an object has been parsed, no more bytes will be used.'''
+        if len(buf) == 0:
+            return 0
+        used = 0
+        used += self._read_type(buf)
+        used += self._try_read_size(buf, used)
+
+    def _read_type(self, buf):
+        '''Set self._type, and return 1 if we consumed a byte to do that,
+        otherwise, 0.'''
+        if self._type is not None:
+            return 0
+        else:
+            self._type = get_type(buf[0])
+            return 1
+
+    def _try_read_size(self, buf, buf_start):
+        '''Read bytes into self._size_buffer until it's has all the size bytes
+        for the current type. We might not have enough to fill it completely.
+        (The caller will have to check self._size after this to see if we set
+        it.) Return the number of bytes we used.'''
+        if self._size is not None:
+            return 0
+        bytes_needed = self._type.size_bytes - len(self._size_buffer)
+        bytes_to_use = buf[buf_start:buf_start+bytes_needed]
+        self._size_buffer.extend(bytes_to_use)
+        if len(self._size_buffer) == self._type.size_bytes:
+            self._size = int.from_bytes(self._size_buffer, byteorder='big')
+        return len(bytes_to_use)
