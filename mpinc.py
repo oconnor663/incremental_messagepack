@@ -1,7 +1,7 @@
 #! /usr/bin/env python3
 
 
-def make_type(name, tag, builder_fn, size_len=0, tag_bits=8,
+def make_type(tag, name, builder_fn, size_len=0, tag_bits=8,
               is_container=False):
 
     tag_mask = (255 << (8-tag_bits)) % 256
@@ -18,9 +18,7 @@ def make_type(name, tag, builder_fn, size_len=0, tag_bits=8,
             self.tag_byte = tag_byte
             self.size_len = size_len
             self.name = name
-
-        def is_container(self):
-            return is_container
+            self.is_container = is_container
 
         def size(self, size_buffer):
             assert len(size_buffer) == size_len
@@ -58,10 +56,10 @@ def build_str(_, payload):
 
 
 MessagePackTypes = [
-    make_type("positive fixint", 0x00, return_size, tag_bits=1),
-    make_type("fixstr",          0xa0, build_str, tag_bits=3),
-    make_type("fixarray",        0x90, return_payload, tag_bits=4),
-    make_type("array16",         0xdc, return_payload, size_len=2),
+    make_type(0x00, "positive fixint", return_size, tag_bits=1),
+    make_type(0xa0, "fixstr", build_str, tag_bits=3),
+    make_type(0x90, "fixarray", return_payload, tag_bits=4, is_container=True),
+    make_type(0xdc, "array16", return_payload, size_len=2, is_container=True),
 ]
 
 
@@ -72,24 +70,32 @@ class Decoder:
         self._size_buffer = bytearray()
         self._type = None
         self._size = None
+        self._payload_buffer = bytearray()
+        self._payload_list = []
+        self._child_decoder = None
 
-    def write(self, buf):
+    def write(self, buf, buf_start=0):
         '''Feed bytes into the decoder. Returns the number of bytes used. Once
         an object has been parsed, no more bytes will be used.'''
-        if len(buf) == 0:
+        if len(buf) == 0 or self.has_value:
             return 0
         used = 0
-        used += self._read_type(buf)
-        used += self._try_read_size(buf, used)
+        used += self._read_type(buf, buf_start)
+        used += self._try_read_size(buf, buf_start + used)
         if self._size is None:
-            return None
+            return used
+        if self._type.is_container:
+            used += self._write_into_container(buf, buf_start + used)
+        else:
+            used += self._write_into_bytes(buf, buf_start + used)
+        return used
 
-    def _read_type(self, buf):
+    def _read_type(self, buf, buf_start):
         '''Set self._type, and return 1 if we consumed a byte to do that,
         otherwise, 0.'''
         if self._type is not None:
             return 0
-        tag_byte = buf[0]
+        tag_byte = buf[buf_start]
         for T in MessagePackTypes:
             if T.matches_tag(tag_byte):
                 self._type = T(tag_byte)
@@ -110,6 +116,36 @@ class Decoder:
             self._size = self._type.size(self._size_buffer)
         return len(bytes_to_use)
 
+    def _write_into_container(self, buf, buf_start):
+        used = 0
+        print("START")
+        while len(self._payload_list) < self._size:
+            if len(buf) <= buf_start + used:
+                print("OUT")
+                break
+            if self._child_decoder is None:
+                self._child_decoder = Decoder()
+            used += self._child_decoder.write(buf, buf_start)
+            print("used:", used)
+            if self._child_decoder.has_value:
+                print("acquired", repr(self._child_decoder.value))
+                self._payload_list.append(self._child_decoder.value)
+                self._child_decoder = None
+        else:
+            self.has_value = True
+            self.value = self._type.build(self._payload_list)
+        return used
+
+    def _write_into_bytes(self, buf, buf_start):
+        # TODO: Some duplicated code here.
+        bytes_needed = self._size - len(self._payload_buffer)
+        bytes_to_use = buf[buf_start:buf_start+bytes_needed]
+        self._payload_buffer.extend(bytes_to_use)
+        if len(self._payload_buffer) == self._size:
+            self.has_value = True
+            self.value = self._type.build(self._payload_buffer)
+        return len(bytes_to_use)
+
 
 def main():
     from umsgpack import packb
@@ -118,6 +154,9 @@ def main():
     d.write(b)
     assert d._type.name == 'fixarray'
     assert d._size == 2
+    assert d.has_value
+    print(d.value)
+    assert d.value == [5, 6]
     print('Success!')
 
 
