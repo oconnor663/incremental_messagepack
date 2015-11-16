@@ -62,7 +62,7 @@ def build_uint(N, payload):
 
 
 def build_str(N, payload):
-    return payload.encode()
+    return payload.decode('utf8')
 
 
 MessagePackTypes = [
@@ -158,16 +158,26 @@ class Decoder:
         return len(bytes_to_use)
 
 
+tests = [
+    0,
+    1,
+    "",
+    "foo",
+    [],
+    [1, "two", 3]
+]
+
+
 def main():
     from umsgpack import packb
-    b = packb([5, 6])
-    d = Decoder()
-    d.write(b)
-    assert d._type.name == 'fixarray'
-    assert d._size == 2
-    assert d.has_value
-    assert d.value == [5, 6]
-    print('Success!')
+    for val in tests:
+        print('Testing ' + repr(val))
+        b = packb(val)
+        d = Decoder()
+        used = d.write(b)
+        assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
+        assert d.has_value
+        assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
 
 
 if __name__ == '__main__':
