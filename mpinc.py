@@ -84,10 +84,13 @@ MessagePackTypes = [
               size_fn=size_map),
     make_type(0x90, "fixarray", build_return_payload, tag_bits=4,
               is_container=True),
+    make_type(0xa0, "fixstr", build_str, tag_bits=3),
     make_type(0xc0, "nil", build_const(None), size_fn=size_const(0)),
     make_type(0xc2, "false", build_const(False), size_fn=size_const(0)),
     make_type(0xc3, "true", build_const(True), size_fn=size_const(0)),
-    make_type(0xa0, "fixstr", build_str, tag_bits=3),
+    make_type(0xc4, "bin8", build_return_payload, size_len=1),
+    make_type(0xc5, "bin16", build_return_payload, size_len=2),
+    make_type(0xc6, "bin32", build_return_payload, size_len=4),
     make_type(0xdc, "array16", build_return_payload, size_len=2,
               is_container=True),
 ]
@@ -188,6 +191,10 @@ tests = [
     None,
     True,
     False,
+    b"",
+    b"1",
+    b"1" * (2**8),
+    b"1" * (2**16),
 ]
 
 
