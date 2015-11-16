@@ -49,6 +49,10 @@ def size_map(N):
     return 2*N
 
 
+def build_const(const):
+    return lambda N, payload: const
+
+
 def build_return_N(N, payload):
     return N
 
@@ -80,6 +84,9 @@ MessagePackTypes = [
               size_fn=size_map),
     make_type(0x90, "fixarray", build_return_payload, tag_bits=4,
               is_container=True),
+    make_type(0xc0, "nil", build_const(None), size_fn=size_const(0)),
+    make_type(0xc2, "false", build_const(False), size_fn=size_const(0)),
+    make_type(0xc3, "true", build_const(True), size_fn=size_const(0)),
     make_type(0xa0, "fixstr", build_str, tag_bits=3),
     make_type(0xdc, "array16", build_return_payload, size_len=2,
               is_container=True),
@@ -178,6 +185,9 @@ tests = [
     [0] * 100,
     {},
     {'a': 1, 'b': [2]},
+    None,
+    True,
+    False,
 ]
 
 
