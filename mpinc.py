@@ -45,6 +45,10 @@ def size_const(const):
     return lambda N: const
 
 
+def size_map(N):
+    return 2*N
+
+
 def build_return_N(N, payload):
     return N
 
@@ -65,12 +69,18 @@ def build_str(N, payload):
     return payload.decode('utf8')
 
 
+def build_map(N, payload):
+    return {payload[2*i]: payload[2*i+1] for i in range(len(payload)//2)}
+
+
 MessagePackTypes = [
     make_type(0x00, "positive fixint", build_return_N, tag_bits=1,
               size_fn=size_const(0)),
-    make_type(0xa0, "fixstr", build_str, tag_bits=3),
+    make_type(0x80, "fixmap", build_map, tag_bits=4, is_container=True,
+              size_fn=size_map),
     make_type(0x90, "fixarray", build_return_payload, tag_bits=4,
               is_container=True),
+    make_type(0xa0, "fixstr", build_str, tag_bits=3),
     make_type(0xdc, "array16", build_return_payload, size_len=2,
               is_container=True),
 ]
@@ -164,20 +174,23 @@ tests = [
     "",
     "foo",
     [],
-    [1, "two", 3]
+    [1, "two", 3],
+    [0] * 100,
+    {},
+    {'a': 1, 'b': [2]},
 ]
 
 
 def main():
     from umsgpack import packb
     for val in tests:
-        print('Testing ' + repr(val))
+        print('Testing ' + repr(val)[:20] + ' ...')
         b = packb(val)
         d = Decoder()
         used = d.write(b)
-        assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
         assert d.has_value
         assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
+        assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
 
 
 if __name__ == '__main__':
