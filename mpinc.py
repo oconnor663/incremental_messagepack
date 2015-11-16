@@ -1,5 +1,7 @@
 #! /usr/bin/env python3
 
+from collections import namedtuple
+
 
 # TODO: Can we avoid using a big class for all this?
 def make_type(tag, name, builder_fn, size_len=0, tag_bits=8,
@@ -49,6 +51,10 @@ def size_map(N):
     return 2*N
 
 
+def size_ext(N):
+    return N + 1
+
+
 def build_const(const):
     return lambda N, payload: const
 
@@ -57,8 +63,12 @@ def build_return_N(N, payload):
     return N
 
 
-def build_return_payload(N, payload):
-    return payload
+def build_bytes(N, payload):
+    return bytes(payload)
+
+
+def build_tuple(N, payload):
+    return tuple(payload)
 
 
 def build_int(N, payload):
@@ -77,22 +87,30 @@ def build_map(N, payload):
     return {payload[2*i]: payload[2*i+1] for i in range(len(payload)//2)}
 
 
+def build_ext(N, payload):
+    return Ext(payload[0], bytes(payload[1:]))
+
+
+Ext = namedtuple('Ext', ['type', 'data'])
+
+
 MessagePackTypes = [
     make_type(0x00, "positive fixint", build_return_N, tag_bits=1,
               size_fn=size_const(0)),
     make_type(0x80, "fixmap", build_map, tag_bits=4, is_container=True,
               size_fn=size_map),
-    make_type(0x90, "fixarray", build_return_payload, tag_bits=4,
-              is_container=True),
+    make_type(0x90, "fixarray", build_tuple, tag_bits=4, is_container=True),
     make_type(0xa0, "fixstr", build_str, tag_bits=3),
     make_type(0xc0, "nil", build_const(None), size_fn=size_const(0)),
     make_type(0xc2, "false", build_const(False), size_fn=size_const(0)),
     make_type(0xc3, "true", build_const(True), size_fn=size_const(0)),
-    make_type(0xc4, "bin8", build_return_payload, size_len=1),
-    make_type(0xc5, "bin16", build_return_payload, size_len=2),
-    make_type(0xc6, "bin32", build_return_payload, size_len=4),
-    make_type(0xdc, "array16", build_return_payload, size_len=2,
-              is_container=True),
+    make_type(0xc4, "bin8", build_bytes, size_len=1),
+    make_type(0xc5, "bin16", build_bytes, size_len=2),
+    make_type(0xc6, "bin32", build_bytes, size_len=4),
+    make_type(0xc7, "ext8", build_ext, size_len=1, size_fn=size_ext),
+    make_type(0xc8, "ext16", build_ext, size_len=2, size_fn=size_ext),
+    make_type(0xc9, "ext32", build_ext, size_len=4, size_fn=size_ext),
+    make_type(0xdc, "array16", build_tuple, size_len=2, is_container=True),
 ]
 
 
@@ -178,35 +196,39 @@ class Decoder:
         return len(bytes_to_use)
 
 
-tests = [
-    0,
-    1,
-    "",
-    "foo",
-    [],
-    [1, "two", 3],
-    [0] * 100,
-    {},
-    {'a': 1, 'b': [2]},
-    None,
-    True,
-    False,
-    b"",
-    b"1",
-    b"1" * (2**8),
-    b"1" * (2**16),
-]
-
-
 def main():
-    from umsgpack import packb
+    import umsgpack
+
+    tests = [
+        0,
+        1,
+        "",
+        "foo",
+        (),
+        (1, "two", 3),
+        (0) * 100,
+        {},
+        {'a': 1, 'b': (2,)},
+        None,
+        True,
+        False,
+        b"",
+        b"1",
+        b"1" * (2**8),
+        b"1" * (2**16),
+        umsgpack.Ext(5, b''),
+    ]
+
     for val in tests:
-        print('Testing ' + repr(val)[:20] + ' ...')
-        b = packb(val)
+        print('Testing ' + repr(val)[:40] + ' ...')
+        b = umsgpack.packb(val)
         d = Decoder()
         used = d.write(b)
         assert d.has_value
-        assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
+        new_val = d.value
+        if isinstance(new_val, Ext):
+            new_val = umsgpack.Ext(*new_val)
+        assert val == new_val, '{} != {}'.format(repr(val), repr(new_val))
         assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
 
 
