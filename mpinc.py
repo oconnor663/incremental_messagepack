@@ -2,7 +2,6 @@
 
 from collections import namedtuple
 from struct import pack
-import io
 
 
 # tag: The expected first byte when masked with tag_mask, e.g. 0xc0 for nil.
@@ -183,73 +182,63 @@ make_type(0xc9, "ext32", build_ext, N_size=4, len_fn=ext_len)
 
 # --------- Decoder ---------------
 
-class CappedBuffer:
-    '''A buffer writer that takes reader objects as input. The input readers
-    are expected to be BytesIO, or something else non-blocking. A CappedBuffer
-    will never consume more than `capacity` bytes, cumulative over all calls to
-    write().'''
-    def __init__(self, capacity):
-        self.buffer = bytearray()
-        self.capacity = capacity
-
-    def write(self, reader):
-        needed = self.capacity - len(self.buffer)
-        bytes_read = reader.read(needed)  # Could be less than needed.
-        self.buffer.extend(bytes_read)
-
-    def full(self):
-        return len(self.buffer) >= self.capacity
-
-    def __len__(self):
-        return len(self.buffer)
-
 class SpilloverWriter:
     '''A buffer writer that takes regular byte buffers as input. It wraps a
-    collection of CappedBuffers. Writes that exceed the capacity of the first
-    buffer spill over into the next. The buffers are iterated over exactly
-    once, so it's possible for the `capped_buffers` argument to be a generator.
-    In that case, when control reenters the generator, the previously yielded
-    buffer is guaranteed to be full.'''
+    collection of (buffer, capacity) pairs. Writes that exceed the capacity of
+    the first buffer spill over into the next. The buffers are iterated over
+    exactly once, so it's possible for the `capped_buffers` argument to be a
+    generator. In that case, when control reenters the generator, the
+    previously yielded buffer is guaranteed to be full.'''
     def __init__(self, capped_buffers):
         self._buf_iterator = iter(capped_buffers)
-        self._current_buffer = None
+        self._current = None
+        self._size = None
         self._full = False
 
     def write(self, buf):
-        reader = io.BytesIO(buf)
+        '''Write as many bytes out of buf as we can, to as many capped buffers
+        as necessary, until either we reach the end of buf or all capped
+        buffers are exhausted. Return the number of bytes written.'''
+        index = 0
         while not self._full:
             try:
-                if self._current_buffer is None:
-                    self._current_buffer = next(self._buf_iterator)
-                self._current_buffer.write(reader)
-                if self._current_buffer.full():
-                    self._current_buffer = None
+                if self._current is None:
+                    # Get a buffer.
+                    self._current, self._size = next(self._buf_iterator)
+                needed = self._size - len(self._current)
+                read_bytes = buf[index:index+needed]
+                index += len(read_bytes)
+                self._current.extend(read_bytes)
+                if len(self._current) == self._size:
+                    # Done with this one.
+                    self._current = None
                 else:
                     break
             except StopIteration:
+                # All buffers are finished.
                 self._full = True
-        return reader.tell()
+        return index
 
     def full(self):
         return self._full
 
 def decode_coroutine(value_holder):
-    '''A generator yielding a bunch of CappedBuffer objects, for use with
+    '''A generator yielding a bunch of buffer objects, for use with
     SpilloverWriter. This relies on the guarantee that after returning from
     yield, the yielded buffer will be full. At the end, the fully parsed
     MessagePack object will be appended to `value_holder`.'''
-    type_buf = CappedBuffer(1)
-    yield type_buf
-    tag_byte = type_buf.buffer[0]
+    type_buf = bytearray()
+    yield type_buf, 1
+    tag_byte = type_buf[0]
     mptype = get_type(tag_byte)
-    N_buf = CappedBuffer(mptype.N_size)
-    yield N_buf
-    N = get_N(mptype, tag_byte, N_buf.buffer)
+    N_buf = bytearray()
+    yield N_buf, mptype.N_size
+    N = get_N(mptype, tag_byte, N_buf)
     L = get_len(mptype, N)
     if not mptype.is_container:
-        value_buf = CappedBuffer(L)
-        yield value_buf
-        value = build(mptype, N, value_buf.buffer)
+        value_buf = bytearray()
+        yield value_buf, L
+        value = build(mptype, N, value_buf)
         value_holder.append(value)
     else:
         items = []
