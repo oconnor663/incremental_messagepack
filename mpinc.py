@@ -2,6 +2,7 @@
 
 from collections import namedtuple
 from struct import pack
+import io
 
 
 # tag: The expected first byte when masked with tag_mask, e.g. 0xc0 for nil.
@@ -182,27 +183,15 @@ make_type(0xc9, "ext32", build_ext, N_size=4, len_fn=ext_len)
 
 # --------- Decoder ---------------
 
-class OffsetReader:
-    def __init__(self, buffer):
-        self.buffer = buffer
-        self.offset = 0
-
-    def read(self, n):
-        output = self.buffer[self.offset:self.offset+n]
-        self.offset += n
-        return output
-
-    def empty(self):
-        return self.offset >= len(self.buffer)
-
-class FixedBufferWriter:
+class CappedBuffer:
     def __init__(self, capacity):
         self.buffer = bytearray()
         self.capacity = capacity
 
-    def write(self, oreader):
+    def write(self, reader):
         needed = self.capacity - len(self.buffer)
-        self.buffer.extend(oreader.read(needed))
+        bytes_read = reader.read(needed)  # Could be less than needed.
+        self.buffer.extend(bytes_read)
 
     def full(self):
         return len(self.buffer) >= self.capacity
@@ -212,39 +201,39 @@ class FixedBufferWriter:
 
 class SpilloverWriter:
     def __init__(self, writers):
-        self._writers = iter(writers)
-        self._full = False
+        self._writers_iterator = iter(writers)
         self._current_writer = None
+        self._full = False
 
     def write(self, buf):
-        oreader = OffsetReader(buf)
+        reader = io.BytesIO(buf)
         while not self._full:
             try:
                 if self._current_writer is None:
-                    self._current_writer = next(self._writers)
-                self._current_writer.write(oreader)
+                    self._current_writer = next(self._writers_iterator)
+                self._current_writer.write(reader)
                 if self._current_writer.full():
                     self._current_writer = None
                 else:
                     break
             except StopIteration:
                 self._full = True
-        return oreader.offset
+        return reader.tell()
 
     def full(self):
         return self._full
 
-def decode_generator(value_holder):
-    type_buf = FixedBufferWriter(1)
+def decode_coroutine(value_holder):
+    type_buf = CappedBuffer(1)
     yield type_buf
     tag_byte = type_buf.buffer[0]
     mptype = get_type(tag_byte)
-    N_buf = FixedBufferWriter(mptype.N_size)
+    N_buf = CappedBuffer(mptype.N_size)
     yield N_buf
     N = get_N(mptype, tag_byte, N_buf.buffer)
     L = get_len(mptype, N)
     if not mptype.is_container:
-        value_buf = FixedBufferWriter(L)
+        value_buf = CappedBuffer(L)
         yield value_buf
         value = build(mptype, N, value_buf.buffer)
         value_holder.append(value)
@@ -252,7 +241,7 @@ def decode_generator(value_holder):
         items = []
         for i in range(L):
             item_holder = []
-            yield from decode_generator(item_holder)
+            yield from decode_coroutine(item_holder)
             items.append(item_holder[0])
         value = build(mptype, N, items)
         value_holder.append(value)
@@ -261,7 +250,8 @@ class MessagePackDecoder:
     def __init__(self):
         self.value = None
         self._value_holder = []
-        self._spillover = SpilloverWriter(decode_generator(self._value_holder))
+        buffers_generator = decode_coroutine(self._value_holder)
+        self._spillover = SpilloverWriter(buffers_generator)
 
     def write(self, buf):
         used = self._spillover.write(buf)
