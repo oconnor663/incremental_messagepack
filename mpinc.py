@@ -184,6 +184,10 @@ make_type(0xc9, "ext32", build_ext, N_size=4, len_fn=ext_len)
 # --------- Decoder ---------------
 
 class CappedBuffer:
+    '''A buffer writer that takes reader objects as input. The input readers
+    are expected to be BytesIO, or something else non-blocking. A CappedBuffer
+    will never consume more than `capacity` bytes, cumulative over all calls to
+    write().'''
     def __init__(self, capacity):
         self.buffer = bytearray()
         self.capacity = capacity
@@ -200,20 +204,26 @@ class CappedBuffer:
         return len(self.buffer)
 
 class SpilloverWriter:
-    def __init__(self, writers):
-        self._writers_iterator = iter(writers)
-        self._current_writer = None
+    '''A buffer writer that takes regular byte buffers as input. It wraps a
+    collection of CappedBuffers. Writes that exceed the capacity of the first
+    buffer spill over into the next. The buffers are iterated over exactly
+    once, so it's possible for the `capped_buffers` argument to be a generator.
+    In that case, when control reenters the generator, the previously yielded
+    buffer is guaranteed to be full.'''
+    def __init__(self, capped_buffers):
+        self._buf_iterator = iter(capped_buffers)
+        self._current_buffer = None
         self._full = False
 
     def write(self, buf):
         reader = io.BytesIO(buf)
         while not self._full:
             try:
-                if self._current_writer is None:
-                    self._current_writer = next(self._writers_iterator)
-                self._current_writer.write(reader)
-                if self._current_writer.full():
-                    self._current_writer = None
+                if self._current_buffer is None:
+                    self._current_buffer = next(self._buf_iterator)
+                self._current_buffer.write(reader)
+                if self._current_buffer.full():
+                    self._current_buffer = None
                 else:
                     break
             except StopIteration:
@@ -224,6 +234,10 @@ class SpilloverWriter:
         return self._full
 
 def decode_coroutine(value_holder):
+    '''A generator yielding a bunch of CappedBuffer objects, for use with
+    SpilloverWriter. This relies on the guarantee that after returning from
+    yield, the yielded buffer will be full. At the end, the fully parsed
+    MessagePack object will be appended to `value_holder`.'''
     type_buf = CappedBuffer(1)
     yield type_buf
     tag_byte = type_buf.buffer[0]
@@ -247,6 +261,7 @@ def decode_coroutine(value_holder):
         value_holder.append(value)
 
 class MessagePackDecoder:
+    '''A wrapper object around the decode_coroutine and a SpilloverWriter.'''
     def __init__(self):
         self.value = None
         self._value_holder = []
@@ -254,13 +269,15 @@ class MessagePackDecoder:
         self._spillover = SpilloverWriter(buffers_generator)
 
     def write(self, buf):
+        if self.full():
+            return 0
         used = self._spillover.write(buf)
         if self._spillover.full():
             self.value = self._value_holder[0]
         return used
 
     def full(self):
-        return self._spillover.full()
+        return len(self._value_holder) > 0
 
 tests = [
     (b'\x00', 0),
