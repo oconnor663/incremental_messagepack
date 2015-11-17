@@ -225,8 +225,7 @@ class SpilloverWriter:
                 self._current_writer.write(oreader)
                 if self._current_writer.full():
                     self._current_writer = None
-                    continue
-                if oreader.empty():
+                else:
                     break
             except StopIteration:
                 self._full = True
