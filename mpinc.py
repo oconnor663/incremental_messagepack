@@ -2,7 +2,6 @@
 
 from collections import namedtuple
 from struct import pack
-import io
 
 
 # tag: The expected first byte when masked with tag_mask, e.g. 0xc0 for nil.
@@ -183,85 +182,6 @@ make_type(0xc9, "ext32", build_ext, N_size=4, len_fn=ext_len)
 
 # --------- Decoder ---------------
 
-class Decoder:
-    def __init__(self):
-        self.has_value = False
-        self.value = None
-        self._type = None
-        self._N_buf = bytearray()
-        self._N = None
-        self._L = None
-        self._value_buf = bytearray()
-        self._items = []
-        self._child_decoder = None
-
-    def write(self, buf):
-        '''Wrap the input buffer in a BytesIO, feed it in, and return the
-        number of bytes used.'''
-        bytesio = io.BytesIO(buf)
-        self._write_bytesio(bytesio)
-        return bytesio.tell()
-
-    def _write_bytesio(self, bytesio):
-        if self.has_value:
-            return
-        self._read_type(bytesio)
-        if self._type is None:
-            return
-        self._read_N(bytesio)
-        if self._N is None:
-            return
-        if self._type.is_container:
-            self._read_into_container(bytesio)
-        else:
-            self._read_into_bytes(bytesio)
-
-    def _read_type(self, bytesio):
-        if self._type is not None:
-            return
-        tag_byte = bytesio.read(1)
-        if tag_byte == b'':
-            return
-        self._tag_byte = tag_byte[0]
-        self._type = get_type(self._tag_byte)
-
-    def _read_N(self, bytesio):
-        if self._N is not None:
-            return
-        bytes_needed = self._type.N_size - len(self._N_buf)
-        bytes_read = bytesio.read(bytes_needed)
-        self._N_buf.extend(bytes_read)
-        if len(self._N_buf) == self._type.N_size:
-            self._N = get_N(self._type, self._tag_byte, self._N_buf)
-            self._L = get_len(self._type, self._N)
-
-    def _read_into_container(self, bytesio):
-        if self.has_value:
-            return
-        while len(self._items) < self._L:
-            if len(bytesio.getvalue()) <= bytesio.tell():
-                break
-            if self._child_decoder is None:
-                self._child_decoder = Decoder()
-            self._child_decoder._write_bytesio(bytesio)
-            if self._child_decoder.has_value:
-                self._items.append(self._child_decoder.value)
-                self._child_decoder = None
-        else:
-            self.has_value = True
-            self.value = build(self._type, self._N, self._items)
-
-    def _read_into_bytes(self, bytesio):
-        if self.has_value:
-            return
-        # TODO: Some duplicated code here.
-        bytes_needed = self._L - len(self._value_buf)
-        bytes_read = bytesio.read(bytes_needed)
-        self._value_buf.extend(bytes_read)
-        if len(self._value_buf) == self._L:
-            self.has_value = True
-            self.value = build(self._type, self._N, self._value_buf)
-
 class OffsetReader:
     def __init__(self, buffer):
         self.buffer = buffer
@@ -276,119 +196,116 @@ class OffsetReader:
         return self.offset >= len(self.buffer)
 
 class FixedBufferWriter:
-    def __init__(self, len):
-        self.buffer = bytearray
-        self.len = len
+    def __init__(self, capacity):
+        self.buffer = bytearray()
+        self.capacity = capacity
 
     def write(self, oreader):
-        needed = self.len - len(self.buffer)
+        needed = self.capacity - len(self.buffer)
         self.buffer.extend(oreader.read(needed))
 
     def full(self):
-        return len(self.buffer) >= self.len
+        return len(self.buffer) >= self.capacity
 
+    def __len__(self):
+        return len(self.buffer)
 
 class SpilloverWriter:
-    def __init__(self):
-        self.writer_callback_pairs = []
+    def __init__(self, writers):
+        self._writers = iter(writers)
+        self._full = False
+        self._current_writer = None
 
-    def add_writer(self, writer, done_callback):
-        self.writer_callback_pairs.append((writer, done_callback))
-
-    def write(self, oreader):
-        # Contract:
-        #   1) Never call write with an empty oreader.
-        #   2) Never call write when the writer is full.
-        while self.writer_callback_pairs:
-            writer, done_callback = self.writer_callback_pairs[0]
-            if writer.full():
-                done_callback(writer, self)
-                self.writer_callback_pairs.pop(0)
-                continue
-            if oreader.empty():
-                break
-            writer.write(oreader)
+    def write(self, buf):
+        oreader = OffsetReader(buf)
+        while not self._full:
+            try:
+                if self._current_writer is None:
+                    self._current_writer = next(self._writers)
+                self._current_writer.write(oreader)
+                if self._current_writer.full():
+                    self._current_writer = None
+                    continue
+                if oreader.empty():
+                    break
+            except StopIteration:
+                self._full = True
+        return oreader.offset
 
     def full(self):
-        return len(self.writer_callback_pairs) == 0
+        return self._full
+
+def decode_generator(value_holder):
+    type_buf = FixedBufferWriter(1)
+    yield type_buf
+    tag_byte = type_buf.buffer[0]
+    mptype = get_type(tag_byte)
+    N_buf = FixedBufferWriter(mptype.N_size)
+    yield N_buf
+    N = get_N(mptype, tag_byte, N_buf.buffer)
+    L = get_len(mptype, N)
+    if not mptype.is_container:
+        value_buf = FixedBufferWriter(L)
+        yield value_buf
+        value = build(mptype, N, value_buf.buffer)
+        value_holder.append(value)
+    else:
+        items = []
+        for i in range(L):
+            item_holder = []
+            yield from decode_generator(item_holder)
+            items.append(item_holder[0])
+        value = build(mptype, N, items)
+        value_holder.append(value)
 
 class MessagePackDecoder:
     def __init__(self):
         self.value = None
-        self.full = False
+        self._value_holder = []
+        self._spillover = SpilloverWriter(decode_generator(self._value_holder))
 
-        self._tag_byte = None
-        self._type = None
-        self._N = None
-        self._L = None
-        self._value_buf = None
-        self._items_list = []
+    def write(self, buf):
+        used = self._spillover.write(buf)
+        if self._spillover.full():
+            self.value = self._value_holder[0]
+        return used
 
-        spillover = SpilloverWriter()
-        spillover.add_writer(FixedBufferWriter(1), self._type_ready)
+    def full(self):
+        return self._spillover.full()
 
-    def write(self, oreader):
-        self._spillover.write(oreader)
-
-    def _type_ready(self, type_buf, spillover):
-        self._tag_byte = self._type_buf.buffer[0]
-        self._type = get_type(self._tag_byte)
-        N_buf = FixedBufferWriter(self._type.N_size)
-        spillover.add_writer(N_buf, self._N_ready)
-
-    def _N_ready(self, N_buf, spillover):
-        self._N = get_N(self._type, self._tag_byte, N_buf)
-        self._L = get_len(self._type, self._N)
-        if self._type.is_container:
-            for i in range(self._L):
-                spillover.add_writer(MessagePackDecoder(), self._maybe_done)
-            self._maybe_done()
-        else:
-            spillover.add_writer(FixedBufferWriter(self._L), self._maybe_done)
-
-    def _maybe_done(self, child, spillover):
-        if not self._type.is_container:
-            self.value = build(self._type, self._N, child.buffer)
-            self.full = True
-            return
-        if len(self._items_list) >= self._L:
-            self.value = build(self._type, self._N, self._items_list)
-            self.full = True
-        DOES THIS WORK???
-
-tests = {
-    b'\x00': 0,
-    b'\x01': 1,
-    b'\xcf\x81h2O\x91\xac\xca\x99': 9324758345798437529,
-    b'\xa0': "",
-    b'\xa3foo': "foo",
-    b'\x90': [],
-    b'\x93\x01\xa3two\x03': [1, "two", 3],
-    b'\xdc\x00d' + b'\x00'*100: [0]*100,
-    b'\x80': {},
-    b'\x82\xa1a\x01\xa1b\x91\x02': {'a': 1, 'b': [2]},
-    b'\xc0': None,
-    b'\xc3': True,
-    b'\xc2': False,
-    b'\xc4\x00': b'',
-    b'\xc4\x011': b'1',
-    b'\xc5\x01\x00' + b'1' * 2**8: b'1' * 2**8,
-    b'\xc6\x00\x01\x00\x00' + b'1' * 2**16: b'1' * 2**16,
-    b'\xc7\x00\x05': Ext(5, b''),
-}
+tests = [
+    (b'\x00', 0),
+    (b'\x01', 1),
+    (b'\xcf\x81h2O\x91\xac\xca\x99', 9324758345798437529),
+    (b'\xa0', ""),
+    (b'\xa3foo', "foo"),
+    (b'\x90', []),
+    (b'\x93\x01\xa3two\x03', [1, "two", 3]),
+    (b'\xdc\x00d' + b'\x00'*100, [0]*100),
+    (b'\x80', {}),
+    (b'\x82\xa1a\x01\xa1b\x91\x02', {'a': 1, 'b': [2]}),
+    (b'\xc0', None),
+    (b'\xc3', True),
+    (b'\xc2', False),
+    (b'\xc4\x00', b''),
+    (b'\xc4\x011', b'1'),
+    (b'\xc5\x01\x00' + b'1' * 2**8, b'1' * 2**8),
+    (b'\xc6\x00\x01\x00\x00' + b'1' * 2**16, b'1' * 2**16),
+    (b'\xc7\x00\x05', Ext(5, b'')),
+]
 
 def main():
-    for b, val in tests.items():
-        d = Decoder()
+    for b, val in tests:
+        d = MessagePackDecoder()
         used = d.write(b)
-        assert d.has_value
+        assert d.full()
         assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
         assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
         # Do it again one byte at a time.
-        d = Decoder()
+        d = MessagePackDecoder()
         for i in range(len(b)):
             d.write(b[i:i+1])
-        assert d.has_value
+        assert d.full()
         assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
 
 if __name__ == '__main__':
