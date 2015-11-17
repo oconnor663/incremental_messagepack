@@ -262,6 +262,100 @@ class Decoder:
             self.has_value = True
             self.value = build(self._type, self._N, self._value_buf)
 
+class OffsetReader:
+    def __init__(self, buffer):
+        self.buffer = buffer
+        self.offset = 0
+
+    def read(self, n):
+        output = self.buffer[self.offset:self.offset+n]
+        self.offset += n
+        return output
+
+    def empty(self):
+        return self.offset >= len(self.buffer)
+
+class FixedBufferWriter:
+    def __init__(self, len):
+        self.buffer = bytearray
+        self.len = len
+
+    def write(self, oreader):
+        needed = self.len - len(self.buffer)
+        self.buffer.extend(oreader.read(needed))
+
+    def full(self):
+        return len(self.buffer) >= self.len
+
+
+class SpilloverWriter:
+    def __init__(self):
+        self.writer_callback_pairs = []
+
+    def add_writer(self, writer, done_callback):
+        self.writer_callback_pairs.append((writer, done_callback))
+
+    def write(self, oreader):
+        # Contract:
+        #   1) Never call write with an empty oreader.
+        #   2) Never call write when the writer is full.
+        while self.writer_callback_pairs:
+            writer, done_callback = self.writer_callback_pairs[0]
+            if writer.full():
+                done_callback(writer, self)
+                self.writer_callback_pairs.pop(0)
+                continue
+            if oreader.empty():
+                break
+            writer.write(oreader)
+
+    def full(self):
+        return len(self.writer_callback_pairs) == 0
+
+class MessagePackDecoder:
+    def __init__(self):
+        self.value = None
+        self.full = False
+
+        self._tag_byte = None
+        self._type = None
+        self._N = None
+        self._L = None
+        self._value_buf = None
+        self._items_list = []
+
+        spillover = SpilloverWriter()
+        spillover.add_writer(FixedBufferWriter(1), self._type_ready)
+
+    def write(self, oreader):
+        self._spillover.write(oreader)
+
+    def _type_ready(self, type_buf, spillover):
+        self._tag_byte = self._type_buf.buffer[0]
+        self._type = get_type(self._tag_byte)
+        N_buf = FixedBufferWriter(self._type.N_size)
+        spillover.add_writer(N_buf, self._N_ready)
+
+    def _N_ready(self, N_buf, spillover):
+        self._N = get_N(self._type, self._tag_byte, N_buf)
+        self._L = get_len(self._type, self._N)
+        if self._type.is_container:
+            for i in range(self._L):
+                spillover.add_writer(MessagePackDecoder(), self._maybe_done)
+            self._maybe_done()
+        else:
+            spillover.add_writer(FixedBufferWriter(self._L), self._maybe_done)
+
+    def _maybe_done(self, child, spillover):
+        if not self._type.is_container:
+            self.value = build(self._type, self._N, child.buffer)
+            self.full = True
+            return
+        if len(self._items_list) >= self._L:
+            self.value = build(self._type, self._N, self._items_list)
+            self.full = True
+        DOES THIS WORK???
+
 tests = {
     b'\x00': 0,
     b'\x01': 1,
