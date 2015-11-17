@@ -262,36 +262,29 @@ class Decoder:
             self.has_value = True
             self.value = build(self._type, self._N, self._value_buf)
 
+tests = {
+    b'\x00': 0,
+    b'\x01': 1,
+    b'\xcf\x81h2O\x91\xac\xca\x99': 9324758345798437529,
+    b'\xa0': "",
+    b'\xa3foo': "foo",
+    b'\x90': [],
+    b'\x93\x01\xa3two\x03': [1, "two", 3],
+    b'\xdc\x00d' + b'\x00'*100: [0]*100,
+    b'\x80': {},
+    b'\x82\xa1a\x01\xa1b\x91\x02': {'a': 1, 'b': [2]},
+    b'\xc0': None,
+    b'\xc3': True,
+    b'\xc2': False,
+    b'\xc4\x00': b'',
+    b'\xc4\x011': b'1',
+    b'\xc5\x01\x00' + b'1' * 2**8: b'1' * 2**8,
+    b'\xc6\x00\x01\x00\x00' + b'1' * 2**16: b'1' * 2**16,
+    b'\xc7\x00\x05': Ext(5, b''),
+}
 
 def main():
-    import umsgpack
-
-    tests = [
-        0,
-        1,
-        9324758345798437529,
-        "",
-        "foo",
-        [],
-        [1, "two", 3],
-        [0] * 100,
-        {},
-        {'a': 1, 'b': [2]},
-        None,
-        True,
-        False,
-        b"",
-        b"1",
-        b"1" * (2**8),
-        b"1" * (2**16),
-        umsgpack.Ext(5, b''),
-    ]
-
-    for val in tests:
-        print('Testing ' + repr(val)[:40] + ' ...')
-        b = umsgpack.packb(val)
-        if isinstance(val, umsgpack.Ext):
-            val = Ext(val.type, val.data)
+    for b, val in tests.items():
         d = Decoder()
         used = d.write(b)
         assert d.has_value
@@ -303,7 +296,6 @@ def main():
             d.write(b[i:i+1])
         assert d.has_value
         assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
-
 
 if __name__ == '__main__':
     main()
