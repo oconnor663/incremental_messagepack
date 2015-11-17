@@ -289,14 +289,19 @@ def main():
     for val in tests:
         print('Testing ' + repr(val)[:40] + ' ...')
         b = umsgpack.packb(val)
+        if isinstance(val, umsgpack.Ext):
+            val = Ext(val.type, val.data)
         d = Decoder()
         used = d.write(b)
         assert d.has_value
-        new_val = d.value
-        if isinstance(val, umsgpack.Ext):
-            val = Ext(val.type, val.data)
-        assert val == new_val, '{} != {}'.format(repr(val), repr(new_val))
+        assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
         assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
+        # Do it again one byte at a time.
+        d = Decoder()
+        for i in range(len(b)):
+            d.write(b[i:i+1])
+        assert d.has_value
+        assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
 
 
 if __name__ == '__main__':
