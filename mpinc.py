@@ -1,82 +1,96 @@
 #! /usr/bin/env python3
 
+
+# This implementation is in two major sections. First, we define a convention
+# for declaring a MessagePack forma, and we declare all the formats from the
+# spec. Second, we implement a decoder based on those declarations.
+
+
 from collections import namedtuple
 from struct import pack
 
 
-# tag: The expected first byte when masked with tag_mask, e.g. 0xc0 for nil.
-# name: e.g. "fixint"
-# tag_mask: The bits of the first byte to use for the tag, e.g. 0b11100000.
-# N_mask: The bits of the first byte to read for N, if any, e.g. 0b00011111.
-# N_size: The number of bytes to read for N, when not using an N_mask.
-# is_container: True if the type contains objects, like array16.
-# len: The number of payload bytes to read, if it is fixed.
-# len_fn: The number of payload bytes to read, if it is a function of N.
-# build_fn: The final value constructor. Its argument will be N if len=0, else
-#           a list of objects if is_container=True, else an array of bytes.
-MessagePackType = namedtuple('MessagePackType', [
-    'tag', 'name', 'tag_mask', 'N_mask', 'N_size', 'is_container', 'len',
-    'len_fn', 'build_fn'])
+# We break down each MessagePack format into four different parts:
+#
+# 1) A tag byte. For the shorter formats (like fixmap), we have to mask the
+# first byte to get the tag. For simplicy we mask everything, and just use a
+# no-op mask for the longer types.
+#
+# 2) A number N, the first thing encoded after the tag. This is either the
+# remaining bits after the tag mask, or a series of whole bytes after the tag.
+# For constants like nil/true/false, we let N be 0 and ignore it.
+#
+# 3) A length L. For many types (like array16), L is equal to N. For some (like
+# map16), L is a function of N. For the rest (like int16), L is a constant.
+#
+# 4) A payload of length L. This is either bytes (as in fixstr) or a list of
+# objects (as in fixarray).
+#
+# Each format describes these parts with a bunch of constants, so that the
+# decoder always works the same way. The only detail the decoder has to be
+# careful with is whether the payload at the end is bytes or objects.
 
-types = []
+class Format:
+    def __init__(self, tag, name, build_fn, tag_bits=8, N_size=0,
+                 holds_objects=False, L_const=None, L_fn=lambda N: N):
+        self.tag = tag
+        self.name = name
+        self.build_fn = build_fn
+        # If tag_bits is 3, then tag_mask is 0b11100000. If tag_bits is 8, then
+        # the tag takes up the whole byte.
+        self.tag_mask = (255 << (8-tag_bits)) % 256
+        # The inverse of tag_mask. So if tag_bits is 3, then N_mask is
+        # 0b00011111. If N_mask is zero, we defer to the N_size bytes.
+        self.N_mask = 255 ^ self.tag_mask
+        self.N_size = N_size
+        self.holds_objects = holds_objects
+        self.L_const = L_const
+        self.L_fn = L_fn
 
-def make_type(tag, name, build_fn, tag_bits=8, N_size=0, is_container=False,
-              len=None, len_fn=lambda N: N):
-    assert len is not None or len_fn is not None
-    # The first tag_bits bits. So if tag_bits=3, then 0b11100000. If
-    # tag_bits=8, then the tag is the whole byte.
-    tag_mask = (255 << (8-tag_bits)) % 256
-    # The inverse of tag_mask. So if tag_bits=3, then 0b00011111. If
-    # tag_bits=8, then N is derived from the N_buf instead of the tag byte.
-    N_mask = 255 ^ tag_mask
-    t = MessagePackType(tag, name, tag_mask, N_mask, N_size, is_container, len,
-                        len_fn, build_fn)
-    types.append(t)
+    def get_N_and_L(self, tag_byte, N_buf):
+        assert len(N_buf) == self.N_size
+        if len(N_buf) > 0:
+            N = int.from_bytes(N_buf, byteorder='big')
+        else:
+            # This is 0 for constant types like nil, which is fine.
+            N = tag_byte & self.N_mask
+        if self.L_const is not None:
+            L = self.L_const
+        else:
+            L = self.L_fn(N)
+        return N, L
 
-def get_type(tag_byte):
-    for mptype in types:
-        if tag_byte & mptype.tag_mask == mptype.tag:
-            return mptype
-    raise TypeError("Unknown tag byte: " + repr(tag_byte))
+    def build(self, N, payload):
+        # The build_fn takes a single argument. If L_const is 0, that argument
+        # is N. Otherwise that argument is the payload (which the decoder must
+        # assemble as either bytes or objects, depending on holds_objects.)
+        return self.build_fn(N if self.L_const == 0 else payload)
 
-def get_N(mptype, tag_byte, N_buf):
-    assert len(N_buf) == mptype.N_size
-    # N is either derived from the bytes in N_buf, or from the N_mask.
-    if len(N_buf) > 0:
-        return int.from_bytes(N_buf, byteorder='big')
-    else:
-        return tag_byte & mptype.N_mask
 
-def get_L(mptype, N):
-    # The length is either fixed, or a function of N.
-    if mptype.len is not None:
-        return mptype.len
-    else:
-        return mptype.len_fn(N)
+formats = []
 
-def build(mptype, N, buf_or_items):
-    # The build_fn takes one of three arguments:
-    #   1) N, if len is fixed at 0.
-    #   2) a list of objects
-    #   3) a bytearray
-    if mptype.len == 0:
-        return mptype.build_fn(N)
-    expected_type = list if mptype.is_container else bytearray
-    assert isinstance(buf_or_items, expected_type)
-    return mptype.build_fn(buf_or_items)
+def make_format(*args, **kwargs):
+    format = Format(*args, **kwargs)
+    formats.append(format)
+
+def get_format(tag_byte):
+    for format in formats:
+        if tag_byte & format.tag_mask == format.tag:
+            return format
+    assert False, 'unknown tag: ' + hex(tag_byte)
 
 
 # nil family
 # ==========
 
-make_type(0xc0, "nil", lambda _: None)
+make_format(0xc0, "nil", lambda _: None)
 
 
 # bool family
 # ===========
 
-make_type(0xc2, "false", lambda _: False)
-make_type(0xc3, "false", lambda _: True)
+make_format(0xc2, "false", lambda _: False)
+make_format(0xc3, "false", lambda _: True)
 
 
 # int family
@@ -88,23 +102,23 @@ def build_uint(buf):
 def build_int(buf):
     return int.from_bytes(buf, byteorder='big', signed=True)
 
-make_type(0x00, "positive fixint", lambda N: N, tag_bits=1, len=0)
-make_type(0xe0, "negative fixint", lambda N: -N, tag_bits=3, len=0)
-make_type(0xcc, "uint8", build_uint, len=1)
-make_type(0xcd, "uint16", build_uint, len=2)
-make_type(0xce, "uint32", build_uint, len=4)
-make_type(0xcf, "uint64", build_uint, len=8)
-make_type(0xcc, "int8", build_int, len=1)
-make_type(0xcd, "int16", build_int, len=2)
-make_type(0xce, "int32", build_int, len=4)
-make_type(0xcf, "int64", build_int, len=8)
+make_format(0x00, "positive fixint", lambda N: N, tag_bits=1, L_const=0)
+make_format(0xe0, "negative fixint", lambda N: -N, tag_bits=3, L_const=0)
+make_format(0xcc, "uint8", build_uint, L_const=1)
+make_format(0xcd, "uint16", build_uint, L_const=2)
+make_format(0xce, "uint32", build_uint, L_const=4)
+make_format(0xcf, "uint64", build_uint, L_const=8)
+make_format(0xcc, "int8", build_int, L_const=1)
+make_format(0xcd, "int16", build_int, L_const=2)
+make_format(0xce, "int32", build_int, L_const=4)
+make_format(0xcf, "int64", build_int, L_const=8)
 
 
 # float family
 # ============
 
-make_type(0xca, "float32", lambda buf: pack('f', buf), len=4)
-make_type(0xcb, "float64", lambda buf: pack('d', buf), len=8)
+make_format(0xca, "float32", lambda buf: pack('f', buf), L_const=4)
+make_format(0xcb, "float64", lambda buf: pack('d', buf), L_const=8)
 
 
 # str family
@@ -113,10 +127,10 @@ make_type(0xcb, "float64", lambda buf: pack('d', buf), len=8)
 def build_str(buf):
     return buf.decode('utf8')
 
-make_type(0xa0, "fixstr", build_str, tag_bits=3)
-make_type(0xd9, "str8", build_str, N_size=1)
-make_type(0xda, "str16", build_str, N_size=2)
-make_type(0xdb, "str32", build_str, N_size=4)
+make_format(0xa0, "fixstr", build_str, tag_bits=3)
+make_format(0xd9, "str8", build_str, N_size=1)
+make_format(0xda, "str16", build_str, N_size=2)
+make_format(0xdb, "str32", build_str, N_size=4)
 
 
 # bin family
@@ -125,9 +139,9 @@ make_type(0xdb, "str32", build_str, N_size=4)
 def build_bin(buf):
     return bytes(buf)
 
-make_type(0xc4, "bin8", build_bin, N_size=1)
-make_type(0xc5, "bin16", build_bin, N_size=2)
-make_type(0xc6, "bin32", build_bin, N_size=4)
+make_format(0xc4, "bin8", build_bin, N_size=1)
+make_format(0xc5, "bin16", build_bin, N_size=2)
+make_format(0xc6, "bin32", build_bin, N_size=4)
 
 
 # array family
@@ -136,9 +150,9 @@ make_type(0xc6, "bin32", build_bin, N_size=4)
 def build_array(items):
     return list(items)
 
-make_type(0x90, "fixarray", build_array, tag_bits=4, is_container=True)
-make_type(0xdc, "array16", build_array, N_size=2, is_container=True)
-make_type(0xdd, "array32", build_array, N_size=4, is_container=True)
+make_format(0x90, "fixarray", build_array, tag_bits=4, holds_objects=True)
+make_format(0xdc, "array16", build_array, N_size=2, holds_objects=True)
+make_format(0xdd, "array32", build_array, N_size=4, holds_objects=True)
 
 
 # map family
@@ -151,12 +165,12 @@ def build_map(items):
     assert len(items) % 2 == 0
     return {items[2*i]: items[2*i+1] for i in range(len(items)//2)}
 
-make_type(0x80, "fixmap", build_map, tag_bits=4, len_fn=map_len,
-          is_container=True)
-make_type(0xde, "map16", build_map, N_size=2, len_fn=map_len,
-          is_container=True)
-make_type(0xdf, "map32", build_map, N_size=4, len_fn=map_len,
-          is_container=True)
+make_format(0x80, "fixmap", build_map, tag_bits=4, L_fn=map_len,
+            holds_objects=True)
+make_format(0xde, "map16", build_map, N_size=2, L_fn=map_len,
+            holds_objects=True)
+make_format(0xdf, "map32", build_map, N_size=4, L_fn=map_len,
+            holds_objects=True)
 
 
 # ext family
@@ -170,14 +184,14 @@ def ext_len(N):
 def build_ext(buf):
     return Ext(buf[0], bytes(buf[1:]))
 
-make_type(0xd4, "fixext1", build_ext, len=2)
-make_type(0xd5, "fixext2", build_ext, len=3)
-make_type(0xd6, "fixext4", build_ext, len=5)
-make_type(0xd7, "fixext8", build_ext, len=9)
-make_type(0xd8, "fixext16", build_ext, len=17)
-make_type(0xc7, "ext8", build_ext, N_size=1, len_fn=ext_len)
-make_type(0xc8, "ext16", build_ext, N_size=2, len_fn=ext_len)
-make_type(0xc9, "ext32", build_ext, N_size=4, len_fn=ext_len)
+make_format(0xd4, "fixext1", build_ext, L_const=2)
+make_format(0xd5, "fixext2", build_ext, L_const=3)
+make_format(0xd6, "fixext4", build_ext, L_const=5)
+make_format(0xd7, "fixext8", build_ext, L_const=9)
+make_format(0xd8, "fixext16", build_ext, L_const=17)
+make_format(0xc7, "ext8", build_ext, N_size=1, L_fn=ext_len)
+make_format(0xc8, "ext16", build_ext, N_size=2, L_fn=ext_len)
+make_format(0xc9, "ext32", build_ext, N_size=4, L_fn=ext_len)
 
 
 # ---------- Decoding ----------
@@ -239,24 +253,24 @@ def decoder_coroutine():
     type_buf = bytearray()
     yield type_buf, 1
     tag_byte = type_buf[0]
-    mptype = get_type(tag_byte)
+    format = get_format(tag_byte)
     # Get the N value and compute the length L. (This is often equal to N, but
     # different for map and ext.)
     N_buf = bytearray()
-    yield N_buf, mptype.N_size
-    N = get_N(mptype, tag_byte, N_buf)
-    L = get_L(mptype, N)
-    # Now if we have a container, defer to child decoders to read its contents.
-    if mptype.is_container:
-        items = []
+    yield N_buf, format.N_size
+    N, L = format.get_N_and_L(tag_byte, N_buf)
+    # Now if we have a container of objects, defer to child decoders to read
+    # its payload. Otherwise, read its payload as more bytes.
+    if format.holds_objects:
+        payload = []
         for i in range(L):
-            item = yield from decoder_coroutine()
-            items.append(item)
-        return build(mptype, N, items)
-    # Otherwise we have a simple object, and we can build it directly.
-    value_buf = bytearray()
-    yield value_buf, L
-    return build(mptype, N, value_buf)
+            obj = yield from decoder_coroutine()
+            payload.append(obj)
+    else:
+        payload = bytearray()
+        yield payload, L
+    # Build and return the final object.
+    return format.build(N, payload)
 
 def Decoder():
     'Here it is!'
