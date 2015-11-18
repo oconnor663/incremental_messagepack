@@ -180,47 +180,55 @@ make_type(0xc8, "ext16", build_ext, N_size=2, len_fn=ext_len)
 make_type(0xc9, "ext32", build_ext, N_size=4, len_fn=ext_len)
 
 
-# --------- Decoder ---------------
+# ---------- Decoding ----------
 
 class SpilloverWriter:
-    '''A buffer writer that takes regular byte buffers as input. It wraps a
-    collection of (buffer, capacity) pairs. Writes that exceed the capacity of
-    the first buffer spill over into the next. The buffers are iterated over
-    exactly once, so it's possible for the `capped_buffers` argument to be a
-    generator. In that case, when control reenters the generator, the
-    previously yielded buffer is guaranteed to be full.'''
-    def __init__(self, capped_buffers):
-        self._buf_iterator = iter(capped_buffers)
-        self._current = None
-        self._size = None
-        self._full = False
+    '''A writer that takes bytes as input. It starts with a collection of
+    (writer, capacity) pairs. Calls to write() are forwarded to the writers in
+    the collection. When a writer reaches capacity, the current write spills
+    over to the next writer. The return value is the total number of bytes
+    written.
+
+    It's expected that the collection of writers will actually be a generator.
+    In that case, when control reenters the generator using next(), the
+    previously yielded writer is guaranteed to be full. Also any value on
+    StopIteration (that is, any `return` at the end of the generator) gets set
+    as the `value` of the SpilloverWriter itself.'''
+    def __init__(self, writer_capacity_pairs):
+        self.full = False
+        self.value = None
+        self._iterator = iter(writer_capacity_pairs)
+        self._writer = None
+        self._capacity = None
 
     def write(self, buf):
-        '''Write as many bytes out of buf as we can, to as many capped buffers
-        as necessary, until either we reach the end of buf or all capped
-        buffers are exhausted. Return the number of bytes written.'''
-        index = 0
-        while not self._full:
-            try:
-                if self._current is None:
-                    # Get a buffer.
-                    self._current, self._size = next(self._buf_iterator)
-                needed = self._size - len(self._current)
-                read_bytes = buf[index:index+needed]
-                index += len(read_bytes)
-                self._current.extend(read_bytes)
-                if len(self._current) == self._size:
-                    # Done with this one.
-                    self._current = None
-                else:
+        bytes_written = 0
+        while True:
+            # If there's no current writer, grab one. If we've run out of
+            # writers, we're done.
+            if self._writer is None:
+                try:
+                    self._writer, self._capacity = next(self._iterator)
+                except StopIteration as stop:
+                    self.full = True
+                    self.value = stop.value
                     break
-            except StopIteration:
-                # All buffers are finished.
-                self._full = True
-        return index
-
-    def full(self):
-        return self._full
+            # Take as many bytes as we can, up to the current writer's
+            # remaining capacity. We might get less than that.
+            available = buf[bytes_written:bytes_written+self._capacity]
+            # Write what we got.
+            self._writer.extend(available)
+            bytes_written += len(available)
+            self._capacity -= len(available)
+            # If we filled the current writer drop it. If not, then we're out
+            # of bytes, and we're done. Note that if we *both* filled the
+            # current writer *and* ran out of bytes, then we keep going. That's
+            # because the next writer might have capacity 0.
+            if self._capacity == 0:
+                self._writer = None
+            else:
+                break
+        return bytes_written
 
 def decode_coroutine(value_holder):
     '''A generator yielding a bunch of buffer objects, for use with
@@ -261,7 +269,7 @@ class MessagePackDecoder:
         if self.full():
             return 0
         used = self._spillover.write(buf)
-        if self._spillover.full():
+        if self._spillover.full:
             self.value = self._value_holder[0]
         return used
 
