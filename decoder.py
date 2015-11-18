@@ -2,7 +2,7 @@
 
 
 # This implementation is in two major sections. First, we define a convention
-# for declaring a MessagePack forma, and we declare all the formats from the
+# for declaring MessagePack formats, and we declare all the formats from the
 # spec. Second, we implement a decoder based on those declarations.
 
 
