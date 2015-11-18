@@ -47,7 +47,7 @@ def get_N(mptype, tag_byte, N_buf):
     else:
         return tag_byte & mptype.N_mask
 
-def get_len(mptype, N):
+def get_L(mptype, N):
     # The length is either fixed, or a function of N.
     if mptype.len is not None:
         return mptype.len
@@ -230,51 +230,40 @@ class SpilloverWriter:
                 break
         return bytes_written
 
-def decode_coroutine(value_holder):
-    '''A generator yielding a bunch of buffer objects, for use with
+def decoder_coroutine():
+    '''A generator yielding a bunch of (buffer, capacity) pairs, for use with
     SpilloverWriter. This relies on the guarantee that after returning from
-    yield, the yielded buffer will be full. At the end, the fully parsed
-    MessagePack object will be appended to `value_holder`.'''
+    yield, the yielded buffer will be full. At the end, return the decoded
+    object (Python sticks returns on the StopIteration).'''
+    # Get the type.
     type_buf = bytearray()
     yield type_buf, 1
     tag_byte = type_buf[0]
     mptype = get_type(tag_byte)
+    # Get the N value and compute the length L. (This is often equal to N, but
+    # different for map and ext.)
     N_buf = bytearray()
     yield N_buf, mptype.N_size
     N = get_N(mptype, tag_byte, N_buf)
-    L = get_len(mptype, N)
-    if not mptype.is_container:
-        value_buf = bytearray()
-        yield value_buf, L
-        value = build(mptype, N, value_buf)
-        value_holder.append(value)
-    else:
+    L = get_L(mptype, N)
+    # Now if we have a container, defer to child decoders to read its contents.
+    if mptype.is_container:
         items = []
         for i in range(L):
-            item_holder = []
-            yield from decode_coroutine(item_holder)
-            items.append(item_holder[0])
-        value = build(mptype, N, items)
-        value_holder.append(value)
+            item = yield from decoder_coroutine()
+            items.append(item)
+        return build(mptype, N, items)
+    # Otherwise we have a simple object, and we can build it directly.
+    value_buf = bytearray()
+    yield value_buf, L
+    return build(mptype, N, value_buf)
 
-class MessagePackDecoder:
-    '''A wrapper object around the decode_coroutine and a SpilloverWriter.'''
-    def __init__(self):
-        self.value = None
-        self._value_holder = []
-        buffers_generator = decode_coroutine(self._value_holder)
-        self._spillover = SpilloverWriter(buffers_generator)
+def Decoder():
+    'Here it is!'
+    writer_capacity_pairs = decoder_coroutine()
+    return SpilloverWriter(writer_capacity_pairs)
 
-    def write(self, buf):
-        if self.full():
-            return 0
-        used = self._spillover.write(buf)
-        if self._spillover.full:
-            self.value = self._value_holder[0]
-        return used
-
-    def full(self):
-        return len(self._value_holder) > 0
+# ---------- Tests ----------
 
 tests = [
     (b'\x00', 0),
@@ -299,16 +288,16 @@ tests = [
 
 def main():
     for b, val in tests:
-        d = MessagePackDecoder()
+        d = Decoder()
         used = d.write(b)
-        assert d.full()
+        assert d.full
         assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
         assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
         # Do it again one byte at a time.
-        d = MessagePackDecoder()
+        d = Decoder()
         for i in range(len(b)):
             d.write(b[i:i+1])
-        assert d.full()
+        assert d.full
         assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
 
 if __name__ == '__main__':
