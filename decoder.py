@@ -117,8 +117,15 @@ make_format(0xcf, "int64", build_int, L_const=8)
 # float family
 # ============
 
-make_format(0xca, "float32", lambda buf: struct.pack('f', buf), L_const=4)
-make_format(0xcb, "float64", lambda buf: struct.pack('d', buf), L_const=8)
+def build_float(buf):
+    # Big-endian.
+    return struct.unpack('>f', buf)[0]
+
+def build_double(buf):
+    return struct.unpack('>d', buf)[0]
+
+make_format(0xca, "float32", build_float, L_const=4)
+make_format(0xcb, "float64", build_double, L_const=8)
 
 
 # str family
@@ -295,9 +302,11 @@ tests = [
     (b'\xc2', False),
     (b'\xc4\x00', b''),
     (b'\xc4\x011', b'1'),
-    (b'\xc5\x01\x00' + b'1' * 2**8, b'1' * 2**8),
-    (b'\xc6\x00\x01\x00\x00' + b'1' * 2**16, b'1' * 2**16),
+    (b'\xc5\x00\x01A', b'A'),
+    (b'\xc6\x00\x00\x00\x01A', b'A'),
     (b'\xc7\x00\x05', Ext(5, b'')),
+    (b'\xca?\x80\x00\x00', 1.0),
+    (b'\xcb@\x16\x00\x00\x00\x00\x00\x00', 5.5),
 ]
 
 def main():
