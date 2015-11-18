@@ -262,8 +262,7 @@ def decoder_coroutine():
     yield type_buf, 1
     tag_byte = type_buf[0]
     format = get_format(tag_byte)
-    # Get the N value and compute the length L. (This is often equal to N, but
-    # different for map and ext.)
+    # Get the N and L values.
     N_buf = bytearray()
     yield N_buf, format.N_size
     N, L = format.get_N_and_L(tag_byte, N_buf)
