@@ -243,8 +243,9 @@ class SpilloverWriter:
             self._capacity -= len(available)
             # If we filled the current writer drop it. If not, then we're out
             # of bytes, and we're done. Note that if we *both* filled the
-            # current writer *and* ran out of bytes, then we keep going. That's
-            # because the next writer might have capacity 0.
+            # current writer *and* ran out of bytes, then we keep going. That
+            # way we find out if there are no more writers left, or if the next
+            # writer has capacity 0.
             if self._capacity == 0:
                 self._writer = None
             else:
