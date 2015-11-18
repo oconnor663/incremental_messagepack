@@ -6,8 +6,8 @@
 # spec. Second, we implement a decoder based on those declarations.
 
 
-from collections import namedtuple
-from struct import pack
+import collections
+import struct
 
 
 # We break down each MessagePack format into four different parts:
@@ -117,8 +117,8 @@ make_format(0xcf, "int64", build_int, L_const=8)
 # float family
 # ============
 
-make_format(0xca, "float32", lambda buf: pack('f', buf), L_const=4)
-make_format(0xcb, "float64", lambda buf: pack('d', buf), L_const=8)
+make_format(0xca, "float32", lambda buf: struct.pack('f', buf), L_const=4)
+make_format(0xcb, "float64", lambda buf: struct.pack('d', buf), L_const=8)
 
 
 # str family
@@ -176,7 +176,7 @@ make_format(0xdf, "map32", build_map, N_size=4, L_fn=map_len,
 # ext family
 # ==========
 
-Ext = namedtuple('Ext', ['type', 'data'])
+Ext = collections.namedtuple('Ext', ['type', 'data'])
 
 def ext_len(N):
     return N+1
