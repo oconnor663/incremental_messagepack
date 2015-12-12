@@ -7,6 +7,7 @@
 
 
 import collections
+import io
 import struct
 
 
@@ -203,86 +204,97 @@ make_format(0xc9, "ext32", build_ext, N_size=4, L_fn=ext_len)
 
 # ---------- Decoding ----------
 
-class SpilloverWriter:
-    '''A writer that takes bytes as input. It starts with a collection of
-    (writer, capacity) pairs. Calls to write() are forwarded to the writers in
-    the collection. When a writer reaches capacity, the current write spills
-    over to the next writer. The return value is the total number of bytes
-    written.
+class FixedBuffer:
+    def __init__(self, size=0):
+        self.size = size
+        self.buffer = bytearray()
 
-    It's expected that the collection of writers will actually be a generator.
-    In that case, when control reenters the generator using next(), the
-    previously yielded writer is guaranteed to be full. Also any value on
-    StopIteration (that is, any `return` at the end of the generator) gets set
-    as the `value` of the SpilloverWriter itself.'''
-    def __init__(self, writer_capacity_pairs):
-        self.full = False
-        self.value = None
-        self._iterator = iter(writer_capacity_pairs)
-        self._writer = None
-        self._capacity = None
+    def write(self, bytesio):
+        if len(self.buffer) >= self.size:
+            return
+        needed = self.size - len(self.buffer)
+        gotten = bytesio.read(needed)  # could be less
+        self.buffer += gotten
+
+    def full(self):
+        return len(self.buffer) >= self.size
+
+    def result(self):
+        assert self.full()
+        return bytes(self.buffer)
+
+
+class MessagePackDecoder:
+    def __init__(self):
+        self._full = False
+        self._tag_buf = FixedBuffer(1)
+        self._format = None
+        self._N = None
+        self._L = None
+
+    def full(self):
+        return self._full
+
+    def result(self):
+        assert self.full()
+        return self._result
 
     def write(self, buf):
-        bytes_written = 0
-        while True:
-            # If there's no current writer, grab one. If we've run out of
-            # writers, we're done.
-            if self._writer is None:
-                try:
-                    self._writer, self._capacity = next(self._iterator)
-                except StopIteration as stop:
-                    self.full = True
-                    self.value = stop.value
-                    break
-            # Take as many bytes as we can, up to the current writer's
-            # remaining capacity. We might get less than that.
-            available = buf[bytes_written:bytes_written+self._capacity]
-            # Write what we got.
-            self._writer.extend(available)
-            bytes_written += len(available)
-            self._capacity -= len(available)
-            # If we filled the current writer drop it. If not, then we're out
-            # of bytes, and we're done. Note that if we *both* filled the
-            # current writer *and* ran out of bytes, then we keep going. That
-            # way we find out if there are no more writers left, or if the next
-            # writer has capacity 0.
-            if self._capacity == 0:
-                self._writer = None
+        bytesio = io.BytesIO(buf)
+        return self._write_bytesio(bytesio)
+
+    def _write_bytesio(self, bytesio):
+        # Determine the format.
+        if self._format is None:
+            self._tag_buf.write(bytesio)
+            if not self._tag_buf.full():
+                # Not done reading.
+                return bytesio.tell()
+            self._tag_byte = self._tag_buf.result()[0]
+            self._format = get_format(self._tag_byte)
+            self._N_buf = FixedBuffer(self._format.N_size)
+
+        # Determine the length.
+        if self._N is None:
+            self._N_buf.write(bytesio)
+            if not self._N_buf.full():
+                # Not done reading.
+                return bytesio.tell()
+            self._N, self._L = self._format.get_N_and_L(
+                self._tag_byte, self._N_buf.result())
+            if self._format.holds_objects:
+                self._payload_list = []
+                self._payload_decoder = None
             else:
-                break
-        return bytes_written
+                self._payload_buffer = FixedBuffer(self._L)
 
-def decoder_coroutine():
-    '''A generator yielding a bunch of (buffer, capacity) pairs, for use with
-    SpilloverWriter. This relies on the guarantee that after returning from
-    yield, the yielded buffer will be full. At the end, return the decoded
-    object (Python sticks returns on the StopIteration).'''
-    # Get the type.
-    type_buf = bytearray()
-    yield type_buf, 1
-    tag_byte = type_buf[0]
-    format = get_format(tag_byte)
-    # Get the N and L values.
-    N_buf = bytearray()
-    yield N_buf, format.N_size
-    N, L = format.get_N_and_L(tag_byte, N_buf)
-    # Now if we have a container of objects, defer to child decoders to read
-    # its payload. Otherwise, read its payload as more bytes.
-    if format.holds_objects:
-        payload = []
-        for i in range(L):
-            obj = yield from decoder_coroutine()
-            payload.append(obj)
-    else:
-        payload = bytearray()
-        yield payload, L
-    # Build and return the final object.
-    return format.build(N, payload)
+        # Build the payload, either with bytes or more MessagePack objects.
+        if not self.full():
+            if self._format.holds_objects:
+                while True:
+                    if len(self._payload_list) == self._L:
+                        self._full = True
+                        self._result = self._format.build(
+                            self._N, self._payload_list)
+                        break
+                    if self._payload_decoder is None:
+                        self._payload_decoder = MessagePackDecoder()
+                    self._payload_decoder._write_bytesio(bytesio)
+                    if not self._payload_decoder.full():
+                        return bytesio.tell()
+                    self._payload_list.append(self._payload_decoder.result())
+                    self._payload_decoder = None
+            else:
+                self._payload_buffer.write(bytesio)
+                if not self._payload_buffer.full():
+                    # Not done reading.
+                    return bytesio.tell()
+                self._full = True
+                self._result = self._format.build(
+                    self._N, self._payload_buffer.result())
 
-def Decoder():
-    'Here it is!'
-    writer_capacity_pairs = decoder_coroutine()
-    return SpilloverWriter(writer_capacity_pairs)
+        return bytesio.tell()
+
 
 # ---------- Tests ----------
 
@@ -311,17 +323,19 @@ tests = [
 
 def main():
     for b, val in tests:
-        d = Decoder()
+        d = MessagePackDecoder()
         used = d.write(b)
-        assert d.full
-        assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
+        assert d.full()
+        assert val == d.result(), '{} != {}'.format(
+            repr(val), repr(d.result()))
         assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
         # Do it again one byte at a time.
-        d = Decoder()
+        d = MessagePackDecoder()
         for i in range(len(b)):
             d.write(b[i:i+1])
-        assert d.full
-        assert val == d.value, '{} != {}'.format(repr(val), repr(d.value))
+        assert d.full()
+        assert val == d.result(), '{} != {}'.format(
+            repr(val), repr(d.result()))
 
 if __name__ == '__main__':
     main()
