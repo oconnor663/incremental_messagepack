@@ -212,7 +212,7 @@ class ThrowingFixedBuffer:
         self._size = size
         self._buffer = bytearray()
 
-    def write_bytesio(self, bytesio):
+    def fill_or_throw(self, bytesio):
         if len(self._buffer) >= self._size:
             return
         needed = self._size - len(self._buffer)
@@ -255,27 +255,11 @@ class MessagePackDecoder:
     def _write_bytesio(self, bytesio):
         # Determine the format.
         if self._format is None:
-            self._tag_buf.write_bytesio(bytesio)
-            if not self._tag_buf.full():
-                # Not done reading.
-                return bytesio.tell()
-            self._tag_byte = self._tag_buf.result()[0]
-            self._format = get_format(self._tag_byte)
-            self._N_buf = ThrowingFixedBuffer(self._format.N_size)
+            self._write_tag(bytesio)
 
         # Determine the length.
         if self._N is None:
-            self._N_buf.write_bytesio(bytesio)
-            if not self._N_buf.full():
-                # Not done reading.
-                return bytesio.tell()
-            self._N, self._L = self._format.get_N_and_L(
-                self._tag_byte, self._N_buf.result())
-            if self._format.holds_objects:
-                self._payload_list = []
-                self._payload_decoder = None
-            else:
-                self._payload_buf = ThrowingFixedBuffer(self._L)
+            self._write_length(bytesio)
 
         # Build the payload, either with bytes or more MessagePack objects.
         if not self.full():
@@ -294,7 +278,7 @@ class MessagePackDecoder:
                     self._payload_list.append(self._payload_decoder.result())
                     self._payload_decoder = None
             else:
-                self._payload_buf.write_bytesio(bytesio)
+                self._payload_buf.fill_or_throw(bytesio)
                 if not self._payload_buf.full():
                     # Not done reading.
                     return bytesio.tell()
@@ -303,6 +287,22 @@ class MessagePackDecoder:
                     self._N, self._payload_buf.result())
 
         return bytesio.tell()
+
+    def _write_tag(self, bytesio):
+        self._tag_buf.fill_or_throw(bytesio)
+        self._tag_byte = self._tag_buf.result()[0]
+        self._format = get_format(self._tag_byte)
+        self._N_buf = ThrowingFixedBuffer(self._format.N_size)
+
+    def _write_length(self, bytesio):
+        self._N_buf.fill_or_throw(bytesio)
+        self._N, self._L = self._format.get_N_and_L(
+            self._tag_byte, self._N_buf.result())
+        if self._format.holds_objects:
+            self._payload_list = []
+            self._payload_decoder = None
+        else:
+            self._payload_buf = ThrowingFixedBuffer(self._L)
 
 
 # ---------- Tests ----------
