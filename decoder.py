@@ -88,7 +88,7 @@ make_format(0xc0, "nil", lambda N, buf: None)
 # ===========
 
 make_format(0xc2, "false", lambda N, buf: False)
-make_format(0xc3, "false", lambda N, buf: True)
+make_format(0xc3, "true", lambda N, buf: True)
 
 
 # int family
