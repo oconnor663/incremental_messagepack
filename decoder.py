@@ -62,10 +62,7 @@ class Format:
         return N, L
 
     def build(self, N, payload):
-        # The build_fn takes a single argument. If L_const is 0, that argument
-        # is N. Otherwise that argument is the payload (which the decoder must
-        # assemble as either bytes or objects, depending on holds_objects.)
-        return self.build_fn(N if self.L_const == 0 else payload)
+        return self.build_fn(N, payload)
 
 
 formats = []
@@ -84,27 +81,33 @@ def get_format(tag_byte):
 # nil family
 # ==========
 
-make_format(0xc0, "nil", lambda _: None)
+make_format(0xc0, "nil", lambda N, buf: None)
 
 
 # bool family
 # ===========
 
-make_format(0xc2, "false", lambda _: False)
-make_format(0xc3, "false", lambda _: True)
+make_format(0xc2, "false", lambda N, buf: False)
+make_format(0xc3, "false", lambda N, buf: True)
 
 
 # int family
 # ==========
 
-def build_uint(buf):
+def build_posfixint(N, buf):
+    return N
+
+def build_negfixint(N, buf):
+    return -N
+
+def build_uint(N, buf):
     return int.from_bytes(buf, byteorder='big', signed=False)
 
-def build_int(buf):
+def build_int(N, buf):
     return int.from_bytes(buf, byteorder='big', signed=True)
 
-make_format(0x00, "positive fixint", lambda N: N, tag_bits=1, L_const=0)
-make_format(0xe0, "negative fixint", lambda N: -N, tag_bits=3, L_const=0)
+make_format(0x00, "positive fixint", build_posfixint, tag_bits=1, L_const=0)
+make_format(0xe0, "negative fixint", build_negfixint, tag_bits=3, L_const=0)
 make_format(0xcc, "uint8", build_uint, L_const=1)
 make_format(0xcd, "uint16", build_uint, L_const=2)
 make_format(0xce, "uint32", build_uint, L_const=4)
@@ -118,11 +121,11 @@ make_format(0xcf, "int64", build_int, L_const=8)
 # float family
 # ============
 
-def build_float(buf):
+def build_float(N, buf):
     # Big-endian.
     return struct.unpack('>f', buf)[0]
 
-def build_double(buf):
+def build_double(N, buf):
     return struct.unpack('>d', buf)[0]
 
 make_format(0xca, "float32", build_float, L_const=4)
@@ -132,7 +135,7 @@ make_format(0xcb, "float64", build_double, L_const=8)
 # str family
 # ==========
 
-def build_str(buf):
+def build_str(N, buf):
     return buf.decode('utf8')
 
 make_format(0xa0, "fixstr", build_str, tag_bits=3)
@@ -144,7 +147,7 @@ make_format(0xdb, "str32", build_str, N_size=4)
 # bin family
 # ==========
 
-def build_bin(buf):
+def build_bin(N, buf):
     return bytes(buf)
 
 make_format(0xc4, "bin8", build_bin, N_size=1)
@@ -155,7 +158,7 @@ make_format(0xc6, "bin32", build_bin, N_size=4)
 # array family
 # ============
 
-def build_array(items):
+def build_array(N, items):
     return list(items)
 
 make_format(0x90, "fixarray", build_array, tag_bits=4, holds_objects=True)
@@ -169,7 +172,7 @@ make_format(0xdd, "array32", build_array, N_size=4, holds_objects=True)
 def map_len(N):
     return 2*N
 
-def build_map(items):
+def build_map(N, items):
     assert len(items) % 2 == 0
     return {items[2*i]: items[2*i+1] for i in range(len(items)//2)}
 
@@ -189,7 +192,7 @@ Ext = collections.namedtuple('Ext', ['type', 'data'])
 def ext_len(N):
     return N+1
 
-def build_ext(buf):
+def build_ext(N, buf):
     return Ext(buf[0], bytes(buf[1:]))
 
 make_format(0xd4, "fixext1", build_ext, L_const=2)
