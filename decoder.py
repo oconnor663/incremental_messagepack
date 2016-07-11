@@ -354,21 +354,26 @@ tests = [
     (b'\xcb@\x16\x00\x00\x00\x00\x00\x00', 5.5),
 ]
 
-def main():
+def run_tests_with_decoder_constructor(constructor):
     for b, val in tests:
-        d = MessagePackDecoder()
+        d = constructor()
         used = d.write(b)
         assert d.full()
         assert val == d.result(), '{} != {}'.format(
             repr(val), repr(d.result()))
         assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
         # Do it again one byte at a time.
-        d = MessagePackDecoder()
+        d = constructor()
         for i in range(len(b)):
             d.write(b[i:i+1])
         assert d.full()
         assert val == d.result(), '{} != {}'.format(
             repr(val), repr(d.result()))
+
+
+def main():
+    run_tests_with_decoder_constructor(MessagePackDecoder)
+
 
 if __name__ == '__main__':
     main()

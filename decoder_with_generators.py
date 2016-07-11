@@ -8,7 +8,7 @@
 
 import io
 
-# Reuse definitions from the first decoder.
+# Reuse definitions and tests from the first decoder.
 import decoder
 
 class DelegatableBuffer:
@@ -82,20 +82,7 @@ class MessagePackDecoder:
         return bytesio
 
 def main():
-    for b, val in decoder.tests:
-        d = MessagePackDecoder()
-        used = d.write(b)
-        assert d.full()
-        assert val == d.result(), '{} != {}'.format(
-            repr(val), repr(d.result()))
-        assert used == len(b), 'only used {} bytes out of {}'.format(len(b), b)
-        # Do it again one byte at a time.
-        d = MessagePackDecoder()
-        for i in range(len(b)):
-            d.write(b[i:i+1])
-        assert d.full()
-        assert val == d.result(), '{} != {}'.format(
-            repr(val), repr(d.result()))
+    decoder.run_tests_with_decoder_constructor(MessagePackDecoder)
 
 if __name__ == '__main__':
     main()
